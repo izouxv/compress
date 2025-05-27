@@ -14,6 +14,9 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
+	"math"
+	mathrand "math/rand"
+	"testing"
 
 	"github.com/dsnet/compress/internal/testutil"
 	"github.com/dsnet/compress/xflate"
@@ -245,4 +248,113 @@ func Example_gzipFile() {
 	// Output:
 	// got:  "ver, white with foam, the driving spray of spume-flakes, the dim\noutlines of the"
 	// want: "ver, white with foam, the driving spray of spume-flakes, the dim\noutlines of the"
+}
+
+type seekItem struct {
+	off     int64
+	seek    int
+	n       int
+	want    string
+	wantpos int64
+	readerr error
+	seekerr string
+}
+
+var testSeekPlaintext = []byte("0123456789")
+
+var testSeekItems = []seekItem{
+
+	{seek: io.SeekStart, off: 0, n: 20, want: "0123456789"},
+	{seek: io.SeekStart, off: 0, n: 5, want: "01234"},
+
+	{seek: io.SeekCurrent, off: 1, wantpos: 6, n: 1, want: "6"},
+	{seek: io.SeekCurrent, off: -3, wantpos: 4, n: 3, want: "456"},
+
+	{seek: io.SeekStart, off: 1, n: 1, want: "1"},
+	{seek: io.SeekCurrent, off: 1, wantpos: 3, n: 2, want: "34"},
+
+	{seek: io.SeekStart, off: -1, seekerr: "xflate: invalid argument: negative position: -1"},
+	// {seek: io.SeekStart, off: -1, seekerr: "bytes.Reader.Seek: negative position"},
+	{seek: io.SeekStart, off: 1 << 33, wantpos: 1 << 33, readerr: io.EOF},
+	{seek: io.SeekCurrent, off: 1, wantpos: 1<<33 + 1, readerr: io.EOF},
+
+	{seek: io.SeekStart, n: 5, want: "01234"},
+	{seek: io.SeekCurrent, n: 5, want: "56789"},
+	{seek: io.SeekEnd, off: -1, n: 1, wantpos: 9, want: "9"},
+
+	{seek: io.SeekStart, n: 0},
+}
+
+func testSeek(t *testing.T, chunkSize int64, tests []seekItem, r io.ReadSeeker) {
+	for i, tt := range tests {
+		pos, err := r.Seek(tt.off, tt.seek)
+		if err == nil && tt.seekerr != "" {
+			t.Errorf("%d. want seek error %q", i, tt.seekerr)
+			continue
+		}
+		if err != nil && err.Error() != tt.seekerr {
+			t.Errorf("%d. seek error = %q; want %q", i, err.Error(), tt.seekerr)
+			continue
+		}
+		if tt.wantpos != 0 && tt.wantpos != pos {
+			t.Errorf("%d. pos = %d, want %d", i, pos, tt.wantpos)
+		}
+		buf := make([]byte, tt.n)
+		n, err := r.Read(buf)
+		if err != tt.readerr {
+			t.Errorf("%d. read = %v; want %v", i, err, tt.readerr)
+			continue
+		}
+		got := string(buf[:n])
+		if got != tt.want {
+			t.Errorf("%d. got %q; want %q, chunkSize: %v", i, got, tt.want, chunkSize)
+		}
+	}
+}
+
+func TestSeekDeflate(t *testing.T) {
+	v_input := testSeekPlaintext
+
+	pow := float64(mathrand.Intn(8) + 1)
+	chunkSize := int64(math.Pow(2, pow))
+
+	var wb, rb bytes.Buffer
+	xw, err := xflate.NewWriter(&wb, &xflate.WriterConfig{
+		ChunkSize: chunkSize,
+	})
+	if err != nil {
+		t.Errorf("unexpected error: NewWriter() = %v", err)
+	}
+	cnt2, err := xw.Write(v_input)
+	cnt := int64(cnt2)
+	// cnt, err := io.Copy(xw, bytes.NewReader(v_input))
+	if err != nil {
+		t.Errorf("unexpected error: Write() = %v", err)
+	}
+	if cnt != int64(len(v_input)) {
+		t.Errorf("write count mismatch: got %d, want %d", cnt, len(v_input))
+	}
+	if err := xw.Close(); err != nil {
+		t.Errorf("unexpected error: Close() = %v", err)
+	}
+
+	xr, err := xflate.NewReader(bytes.NewReader(wb.Bytes()), &xflate.ReaderConfig{})
+	if err != nil {
+		t.Errorf("unexpected error: NewReader() = %v", err)
+	}
+
+	testSeek(t, chunkSize, testSeekItems, xr)
+
+	cnt, err = io.Copy(&rb, xr)
+	if err != nil {
+		t.Errorf("unexpected error: Read() = %v", err)
+	}
+	if cnt != int64(len(v_input)) {
+		t.Errorf("read count mismatch: got %d, want %d", cnt, len(v_input))
+	}
+
+	if err := xr.Close(); err != nil {
+		t.Errorf("unexpected error: Close() = %v", err)
+	}
+
 }

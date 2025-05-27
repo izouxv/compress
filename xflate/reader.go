@@ -159,7 +159,32 @@ func (xr *Reader) Reset(rs io.ReadSeeker) error {
 // Read reads decompressed data from the underlying io.Reader.
 // This method automatically proceeds to the next chunk when the current one
 // has been fully read.
-func (xr *Reader) Read(buf []byte) (int, error) {
+func (xr *Reader) Read(buf []byte) (nn int, errr error) {
+	end := xr.idx.LastRecord().RawOffset
+	if xr.offset >= end {
+		return 0, io.EOF
+	}
+
+	for {
+		n, err := xr.read(buf[nn:])
+		if err != nil {
+			if err == io.EOF && nn > 0 {
+				return
+			}
+			errr = err
+			return
+		}
+		nn += n
+		if len(buf) == nn {
+			return
+		}
+	}
+}
+func (xr *Reader) read(buf []byte) (int, error) {
+	if len(buf) == 0 {
+		return 0, nil
+	}
+
 	if xr.err != nil {
 		return 0, xr.err
 	}
